@@ -38,8 +38,22 @@ window.__ModuleLoader__.load({
         '可用 {date}（2026-11-12）、{title}（会话简称）、{time}、{session}（会话 id 尾段）。用 / 可以建多级目录。',
       titleChars: '简称字数',
       titleCharsHint: '会话简称最多保留几个字，默认 6。',
+      summaryMode: '简称来源',
+      summaryModeHint:
+        '「AI 浓缩」让默认模型读完会话再起名，概括主题而不是截取开头几个字；模型不可用时自动退回截取。',
+      summaryModeAi: 'AI 浓缩（默认）',
+      summaryModeSlice: '标题截取',
+      summaryModel: '浓缩用的模型',
+      summaryModelHint:
+        '留空跟随当前默认模型。要单独指定就同时填 provider 与模型 id，例如 new-api / deepseek-v4.1-flash。',
+      summaryProviderPlaceholder: 'provider（可留空）',
+      summaryModelPlaceholder: '模型 id（可留空）',
+      summaryTimeout: '浓缩超时（毫秒）',
+      summaryTimeoutHint: '超过这个时间就用截取的名字，不耽误开文件夹。默认 25000。',
       preview: '示例',
       previewTitle: '重构认证模块并补充测试',
+      previewSummary: '认证模块重构',
+      previewAiNote: 'AI 模式下最终名字由模型当场浓缩，这里只是示意。',
       collision: '同名文件夹',
       collisionHint: '同一天开多个会话时怎么放。',
       collisionReuse: '复用同一个',
@@ -71,8 +85,23 @@ window.__ModuleLoader__.load({
         'Supports {date} (2026-11-12), {title} (short session title), {time} and {session} (session id tail). Use / for nested folders.',
       titleChars: 'Title length',
       titleCharsHint: 'How many characters the short title keeps. Default 6.',
+      summaryMode: 'Name source',
+      summaryModeHint:
+        'AI summary reads the conversation and names its subject instead of cutting the first few characters. Falls back to slicing when no model is reachable.',
+      summaryModeAi: 'AI summary (default)',
+      summaryModeSlice: 'Slice the title',
+      summaryModel: 'Summarising model',
+      summaryModelHint:
+        'Leave both empty to follow the current default model, or set provider and model id together (for example new-api / deepseek-v4.1-flash).',
+      summaryProviderPlaceholder: 'provider (optional)',
+      summaryModelPlaceholder: 'model id (optional)',
+      summaryTimeout: 'Summary timeout (ms)',
+      summaryTimeoutHint:
+        'Past this the sliced name is used instead, so folder creation is never delayed. Default 25000.',
       preview: 'Preview',
       previewTitle: 'Refactor the auth module',
+      previewSummary: 'Auth refactor',
+      previewAiNote: 'In AI mode the model condenses the real name on the spot; this is only an illustration.',
       collision: 'Name collision',
       collisionHint: 'How several sessions on the same day are placed.',
       collisionReuse: 'Share one folder',
@@ -130,9 +159,39 @@ window.__ModuleLoader__.load({
       return trimEdges(out)
     }
 
-    function previewSegments(template, title, titleChars) {
+    /** Local echo of the Host's fitName, for the preview line only. */
+    function fitName(raw, maxChars) {
+      const budget = Math.max(2, Math.min(24, Math.trunc(Number(maxChars) || 6)))
+      let text = String(raw || '')
+        .replace(/^\s*(?:#{1,6}\s*|[-*+>]\s+|\d+[.)]\s+)/, '')
+        .replace(/[`*_#>]/g, ' ')
+        .replace(/[\r\n\t]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+      if (!text) return ''
+      const quoted = text.match(/^["'“”‘’「」『』【】](.+?)["'“”‘’「」『』【】]$/)
+      if (quoted) text = quoted[1]
+      text = trimEdges(text)
+      if (!text) return ''
+      text = text.replace(
+        /([\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af])\s+(?=[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af])/g,
+        '$1',
+      )
+      if (CJK.test(text)) return trimEdges(Array.from(text).slice(0, budget).join(''))
+      const words = text.split(' ').filter(Boolean)
+      let out = ''
+      for (const word of words) {
+        const candidate = out ? `${out} ${word}` : word
+        if (Array.from(candidate).length > budget) break
+        out = candidate
+      }
+      return trimEdges(out || Array.from(words[0] || '').slice(0, budget).join(''))
+    }
+
+    function previewSegments(template, title, titleChars, summary) {
       const now = new Date()
       const pad = (value) => String(value).padStart(2, '0')
+      const name = fitName(summary, titleChars) || condenseTitle(title, titleChars)
       const rendered = String(template || '')
         .replace(
           /\{date\}/g,
@@ -143,7 +202,7 @@ window.__ModuleLoader__.load({
           `${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`,
         )
         .replace(/\{session\}/g, 'ab12cd34')
-        .replace(/\{title\}/g, condenseTitle(title, titleChars) || 'ab12cd34')
+        .replace(/\{title\}/g, name || 'ab12cd34')
       return rendered
         .split(/[\\/]+/)
         .map((part) =>
@@ -215,8 +274,9 @@ window.__ModuleLoader__.load({
       return h('input', {
         type: props.numeric ? 'number' : 'text',
         value,
-        min: props.numeric ? 2 : undefined,
-        max: props.numeric ? 24 : undefined,
+        min: props.numeric ? (props.min ?? 2) : undefined,
+        max: props.numeric ? (props.max ?? 24) : undefined,
+        placeholder: props.placeholder,
         spellCheck: false,
         disabled: props.disabled,
         'aria-label': props.ariaLabel,
@@ -270,8 +330,13 @@ window.__ModuleLoader__.load({
       const titleChars = numberField('titleChars', 6)
       const collision = field('collision', 'suffix')
       const createMode = field('createMode', 'immediate')
+      const summaryMode = field('summaryMode', 'ai')
+      const summaryProvider = field('summaryProvider', '')
+      const summaryModel = field('summaryModel', '')
+      const summaryTimeoutMs = numberField('summaryTimeoutMs', 25000)
       const sampleTitle = t('previewTitle')
-      const segments = previewSegments(templateText, sampleTitle, titleChars)
+      const sampleSummary = summaryMode === 'ai' ? t('previewSummary') : ''
+      const segments = previewSegments(templateText, sampleTitle, titleChars, sampleSummary)
 
       const write = async (name, next) => {
         setSaveError('')
@@ -363,6 +428,65 @@ window.__ModuleLoader__.load({
             },
           }),
           h('div', { style: hint }, t('titleCharsHint')),
+        ),
+
+        h(
+          'div',
+          { style: divider },
+          h('div', { style: label }, t('summaryMode')),
+          h(
+            'div',
+            { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+            button(t('summaryModeAi'), () => void write('summaryMode', 'ai'), {
+              primary: summaryMode !== 'slice',
+              disabled: !writable,
+            }),
+            button(t('summaryModeSlice'), () => void write('summaryMode', 'slice'), {
+              primary: summaryMode === 'slice',
+              disabled: !writable,
+            }),
+          ),
+          h('div', { style: hint }, summaryMode === 'slice' ? t('titleCharsHint') : t('summaryModeHint')),
+          summaryMode === 'slice'
+            ? null
+            : h(
+                'div',
+                { style: { display: 'flex', flexDirection: 'column', gap: 8 } },
+                h(TextField, {
+                  value: summaryProvider,
+                  disabled: !writable,
+                  ariaLabel: t('summaryModel'),
+                  placeholder: t('summaryProviderPlaceholder'),
+                  onCommit: (next) => void write('summaryProvider', String(next || '').trim()),
+                }),
+                h(TextField, {
+                  value: summaryModel,
+                  disabled: !writable,
+                  ariaLabel: t('summaryModel'),
+                  placeholder: t('summaryModelPlaceholder'),
+                  onCommit: (next) => void write('summaryModel', String(next || '').trim()),
+                }),
+                h(
+                  'div',
+                  { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+                  h('span', { style: hint }, t('summaryTimeout')),
+                  h(TextField, {
+                    value: summaryTimeoutMs,
+                    numeric: true,
+                    min: 3000,
+                    max: 120000,
+                    disabled: !writable,
+                    ariaLabel: t('summaryTimeout'),
+                    onCommit: (next) => {
+                      const parsed = Number.parseInt(String(next), 10)
+                      void write('summaryTimeoutMs', Number.isFinite(parsed) ? parsed : 25000)
+                    },
+                  }),
+                ),
+                h('div', { style: hint }, t('summaryModelHint')),
+                h('div', { style: hint }, t('summaryTimeoutHint')),
+                h('div', { style: hint }, t('previewAiNote')),
+              ),
         ),
 
         h(

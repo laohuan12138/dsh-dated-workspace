@@ -1,8 +1,8 @@
 {
   "name": "dsh-dated-workspace",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "module",
-  "description": "Gives every new session opened in a configured workspace its own folder named after the date and the session title.",
+  "description": "Gives every new session opened in a configured workspace its own folder named after the date and an AI-condensed session title.",
   "license": "MIT",
   "author": "laohuan12138",
   "homepage": "https://github.com/laohuan12138/dsh-dated-workspace#readme",
@@ -22,7 +22,9 @@
     "workspace",
     "session",
     "folder",
-    "date"
+    "date",
+    "summary",
+    "ai"
   ],
   "main": "./index.js",
   "exports": {
@@ -41,6 +43,9 @@
     "README.md",
     "LICENSE"
   ],
+  "scripts": {
+    "test": "node test/names.test.mjs && node test/plugin.test.mjs && node test/client-smoke.mjs"
+  },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.4"
   },

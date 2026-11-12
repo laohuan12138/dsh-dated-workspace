@@ -9,10 +9,18 @@
  * other workspaces, subagents, and sessions with a working directory of their
  * own are left exactly as they were.
  *
- * The short name comes from the session title, which DSH generates after the
- * first turn. The folder is created immediately with the best name available
- * (first message text, else the session id tail) and renamed once the real
- * title lands, so a folder is never blocked on a title that may never come.
+ * The short name is not a substring of the title. With `summaryMode: 'ai'`
+ * (the default) the model condenses what the session is actually about into a
+ * name of at most `titleChars` characters — `帮我看看登录页为什么闪退` becomes
+ * `登录页闪退`, not `帮我看看登录`. The call runs beside the conversation on
+ * the default model route, never blocks a step, and degrades silently to the
+ * old title slicing when no model is reachable (`summaryMode: 'slice'`, or a
+ * provider error), so a folder is never blocked on the network.
+ *
+ * The folder is created immediately with the best name available (first
+ * message text, else the session id tail) and renamed once the condensed name
+ * or the real title lands, so a folder is never blocked on a title that may
+ * never come.
  */
 import { mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises'
 import { basename, join, relative, resolve, isAbsolute } from 'node:path'
@@ -83,6 +91,30 @@ export const Config = schema
         .default(DEFAULT_TITLE_CHARS)
         .volatile()
         .description('{title} 最多保留几个字，默认 6。'),
+      summaryMode: schema
+        .union(['ai', 'slice'])
+        .default('ai')
+        .volatile()
+        .description(
+          'ai 让默认模型把会话内容浓缩成不超过字数的简称（默认）；slice 直接截取标题前几个字。',
+        ),
+      summaryProvider: schema
+        .string()
+        .default('')
+        .volatile()
+        .description('生成简称用的 provider；留空跟随当前默认模型。'),
+      summaryModel: schema
+        .string()
+        .default('')
+        .volatile()
+        .description('生成简称用的模型 id；留空跟随当前默认模型。provider 与 model 需同时填写。'),
+      summaryTimeoutMs: schema
+        .number()
+        .min(3000)
+        .max(120000)
+        .default(25000)
+        .volatile()
+        .description('单次浓缩的超时时间（毫秒），超时就用截取的名字，不耽误开文件夹。'),
       collision: schema
         .union(['reuse', 'suffix'])
         .default('suffix')
@@ -149,6 +181,9 @@ export function safeSegment(raw, max = MAX_NAME_CHARS) {
 
 /** Code points, so an emoji or a CJK character is never split in half. */
 const CJK = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]/
+/** A space between two CJK characters is line noise, not a word gap. */
+const CJK_GAP =
+  /([\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af])\s+(?=[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af])/g
 
 /**
  * Condense a session title into a short folder name.
@@ -195,6 +230,39 @@ export function condenseTitle(raw, maxChars = DEFAULT_TITLE_CHARS) {
   return trimEdges(out)
 }
 
+/**
+ * Trim a model-written name down to the configured budget.
+ *
+ * The model is asked for at most N characters, but a stray quote, a trailing
+ * period, or an English phrase that overran is normal; this is the last word,
+ * so nothing longer than the budget can ever reach a folder name. CJK counts
+ * per character, Latin per whole word, exactly like `condenseTitle`.
+ */
+export function fitName(raw, maxChars = DEFAULT_TITLE_CHARS) {
+  const budget = Math.max(2, Math.min(24, Math.trunc(Number(maxChars) || DEFAULT_TITLE_CHARS)))
+  let text = String(raw ?? '')
+    .replace(LEADING_NOISE, '')
+    .replace(/[`*_#>]/g, ' ')
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (!text) return ''
+  const quoted = text.match(/^["'“”‘’「」『』【】](.+?)["'“”‘’「」『』【】]$/)
+  if (quoted) text = quoted[1]
+  text = trimEdges(text)
+  if (!text) return ''
+  text = text.replace(CJK_GAP, '$1')
+  if (CJK.test(text)) return trimEdges(Array.from(text).slice(0, budget).join(''))
+  const words = text.split(' ').filter(Boolean)
+  let out = ''
+  for (const word of words) {
+    const candidate = out ? `${out} ${word}` : word
+    if (Array.from(candidate).length > budget) break
+    out = candidate
+  }
+  return trimEdges(out || Array.from(words[0] ?? '').slice(0, budget).join(''))
+}
+
 /** Expand a folder-name template into path segments under the workspace. */
 export function planSegments(template, now, session, options = {}) {
   const pad = (value) => String(value).padStart(2, '0')
@@ -204,7 +272,10 @@ export function planSegments(template, now, session, options = {}) {
     String(session?.id ?? '')
       .replace(/[^a-zA-Z0-9]/g, '')
       .slice(-8) || 'session'
-  const title = condenseTitle(options.title, options.titleChars) || id
+  // A model-written summary wins over slicing: it is already the name the
+  // session is about, not its first few characters.
+  const title =
+    fitName(options.summary, options.titleChars) || condenseTitle(options.title, options.titleChars) || id
   const rendered = String(template ?? '')
     .replace(/\{date\}/g, date)
     .replace(/\{time\}/g, time)
@@ -216,6 +287,117 @@ export function planSegments(template, now, session, options = {}) {
     .filter(Boolean)
     .slice(0, MAX_SEGMENTS)
   return segments.length > 0 ? segments : [date]
+}
+
+/** How much conversation text one summary request is allowed to see. */
+const TRANSCRIPT_MAX_CHARS = 4000
+/** Output tokens a name needs; a reasoning model spends a few more. */
+const SUMMARY_MAX_TOKENS = 512
+/** Model calls one session may spend on its folder name before it settles. */
+const MAX_SUMMARY_REQUESTS = 3
+
+/**
+ * The conversation excerpt the model condenses.
+ *
+ * The first human message carries what the session is *for*; the latest
+ * assistant text carries what it turned out to *be about*. Both together are
+ * what a folder name should reflect, and nothing else is needed — tool
+ * output would only add noise and bytes.
+ */
+function collectTranscript(session, messages) {
+  const parts = []
+  const human = textFromMessages(messages) || firstUserText(session)
+  if (human) parts.push(`用户：${human}`)
+  try {
+    const events = session?.snapshotEvents?.() ?? []
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index]
+      if (event?.type !== 'assistant/message') continue
+      const text = messageText(event.data)
+      if (text) {
+        parts.push(`助手：${text}`)
+        break
+      }
+    }
+  } catch {}
+  return parts.join('\n\n').slice(0, TRANSCRIPT_MAX_CHARS).trim()
+}
+
+/** The contract: one name, at most `budget` characters, no commentary. */
+function summarySystemPrompt(budget) {
+  return [
+    `你是文件夹命名器。阅读给出的会话片段，用与会话相同的语言起一个不超过 ${budget} 个字的文件夹名。`,
+    '要求：',
+    `- 只输出名字本身，不超过 ${budget} 个字（中文按字算，英文按字符算），不要引号、标点、解释或前缀。`,
+    '- 概括会话真正在做的主题，而不是照抄开头几个字。',
+    '- 用名词性或动宾短语，例如「登录页闪退排查」「重构认证模块」。',
+    '- 名字里不要出现斜杠、冒号、星号等文件系统保留字符。',
+    '- 会话片段为空或无法判断时，输出「未命名」。',
+  ].join('\n')
+}
+
+/** One user turn carrying the excerpt. */
+function summaryUserPrompt(transcript) {
+  return `会话片段：\n${transcript}\n\n请输出文件夹名：`
+}
+
+/** A message built the same way the agent loop builds a user turn. */
+function requestUserMessage(text) {
+  return {
+    id: `dated-workspace-${Date.now().toString(16)}-${Math.random().toString(16).slice(2, 10)}`,
+    role: 'user',
+    source: { kind: 'user' },
+    content: [{ type: 'text', text }],
+  }
+}
+
+/**
+ * Ask the model for one folder name.
+ *
+ * Runs beside the conversation on the default route, with the lowest reasoning
+ * effort the model offers (a name is not a reasoning problem) and a hard
+ * deadline, so a slow or thinking model can never hold a session hostage.
+ *
+ * @returns the raw model text, or '' when the model produced none.
+ */
+async function requestSummaryName(llm, route, options) {
+  const callConfig = { provider: route.provider, model: route.model, maxTokens: SUMMARY_MAX_TOKENS }
+  const messages = [requestUserMessage(options.user)]
+  const streamOptions = {
+    ...callConfig,
+    messages,
+    system: options.system,
+    signal: options.signal,
+  }
+
+  /** Collect the visible text from one chunk stream. */
+  const drain = async (stream) => {
+    let delta = ''
+    let block = ''
+    for await (const chunk of stream) {
+      if (!chunk || typeof chunk !== 'object') continue
+      if (chunk.type === 'text-delta' && typeof chunk.text === 'string') delta += chunk.text
+      else if (chunk.type === 'block-end' && chunk.block?.type === 'text' && typeof chunk.block.text === 'string') {
+        block = chunk.block.text
+      } else if (chunk.type === 'finish' && chunk.reason?.kind === 'error') {
+        throw Object.assign(new Error(chunk.reason.failure?.message || '模型返回错误'), {
+          code: chunk.reason.failure?.code || 'SUMMARY_MODEL_ERROR',
+        })
+      }
+    }
+    return delta.trim().length > 0 ? delta : block
+  }
+
+  if (typeof llm.prepareCall === 'function') {
+    const prepared = await llm.prepareCall(callConfig, options.signal, (controls, model) => {
+      const efforts = model?.reasoning?.efforts
+      const cheapest = Array.isArray(efforts) ? efforts[0] : undefined
+      return cheapest === undefined ? controls : { ...controls, reasoningEffort: cheapest.id }
+    })
+    return drain(prepared.stream({ ...prepared.config, ...streamOptions }))
+  }
+  if (typeof llm.stream === 'function') return drain(llm.stream(streamOptions))
+  throw Object.assign(new Error('当前 Host 没有可用的 llm 服务'), { code: 'SUMMARY_NO_LLM' })
 }
 
 function messageText(message) {
@@ -338,6 +520,16 @@ export function apply(ctx, rawConfig) {
         owned: false,
         /** Name the folder currently carries, for cheap equality checks. */
         name: '',
+        /** Model-written short name, once one has been produced. */
+        summary: '',
+        /** A summary request is in flight. */
+        summaryPending: false,
+        /** A usable name has been produced; no further call is needed. */
+        summarySettled: false,
+        /** Failed attempts, so a broken provider cannot be retried forever. */
+        summaryAttempts: 0,
+        /** The folder was adopted from a previous run, not created by this one. */
+        adopted: false,
       }
       states.set(session.id, state)
     }
@@ -499,12 +691,99 @@ export function apply(ctx, rawConfig) {
     )
   }
 
-  function nameFor(session, now, title) {
+  function nameFor(session, state, now, title) {
     const segments = planSegments(read('folderName', '{date}-{title}'), now, session, {
       title,
+      summary: state?.summary,
       titleChars: read('titleChars', DEFAULT_TITLE_CHARS),
     })
     return { segments, leaf: segments[segments.length - 1] ?? '' }
+  }
+
+  /** Route for the summary request: explicit pair, else the process default. */
+  function summaryRoute() {
+    const provider = String(read('summaryProvider', '') ?? '').trim()
+    const model = String(read('summaryModel', '') ?? '').trim()
+    if (provider && model) return { provider, model }
+    try {
+      const selection = ctx.get?.('agentDefaultModel')?.currentSelection?.()
+      if (typeof selection?.provider === 'string' && typeof selection?.model === 'string') {
+        if (selection.provider && selection.model) return selection
+      }
+    } catch (error) {
+      warn(`读取默认模型失败：${error?.message ?? error}`)
+    }
+    return undefined
+  }
+
+  /**
+   * Start the condense request for one session, once.
+   *
+   * Deliberately fire-and-forget: the folder must exist the moment the session
+   * opens, so the name is refined in the background and applied at the next
+   * turn boundary. One name per session — a folder that keeps renaming itself
+   * while the conversation drifts would be worse than one honest name.
+   */
+  function requestSummary(agent, session, state, messages) {
+    if (String(read('summaryMode', 'ai')) !== 'ai') return
+    // An adopted folder was already named by the session that created it; a new
+    // call would spend tokens to rename it to something almost identical.
+    if (state.adopted) return
+    if (state.summaryPending || state.summarySettled) return
+    if (state.summaryAttempts >= MAX_SUMMARY_REQUESTS) return
+
+    const human = textFromMessages(messages) || firstUserText(session)
+    if (!human) return
+
+    const llm = ctx.get?.('llm')
+    const route = summaryRoute()
+    if (!llm || (typeof llm.prepareCall !== 'function' && typeof llm.stream !== 'function') || !route) {
+      return
+    }
+
+    const transcript = collectTranscript(session, messages)
+    if (!transcript) return
+
+    const budget = Math.max(
+      2,
+      Math.min(24, Math.trunc(Number(read('titleChars', DEFAULT_TITLE_CHARS)) || DEFAULT_TITLE_CHARS)),
+    )
+    const timeoutMs = Math.max(
+      3000,
+      Math.min(120000, Math.trunc(Number(read('summaryTimeoutMs', 25000)) || 25000)),
+    )
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(new Error('生成简称超时')), timeoutMs)
+    state.summaryPending = true
+    state.summaryAttempts += 1
+
+    void (async () => {
+      try {
+        const raw = await requestSummaryName(llm, route, {
+          system: summarySystemPrompt(budget),
+          user: summaryUserPrompt(transcript),
+          signal: controller.signal,
+        })
+        const name = fitName(raw, budget)
+        if (name && name !== '未命名') {
+          state.summary = name
+          state.summarySettled = true
+          // The name landed out of band: re-enter the queue so the folder is
+          // renamed now rather than at the next user turn. `summarySettled`
+          // makes this a one-shot nudge, not a loop.
+          const live = ctx.get?.('agents')?.get?.(session?.id)
+          if (live !== undefined) void run(live)
+        }
+      } catch (error) {
+        // A missing model, a refused route or a timeout is not an error the user
+        // has to see: the sliced title stays, and the next turn boundary may
+        // retry while the attempt budget lasts.
+        warn(`生成会话简称失败，改用标题截取：${error?.message ?? error}`)
+      } finally {
+        clearTimeout(timer)
+        state.summaryPending = false
+      }
+    })()
   }
 
   /**
@@ -520,8 +799,13 @@ export function apply(ctx, rawConfig) {
     if (!state.owned || state.dir === undefined) return
     if ((await exists(state.dir)) === undefined) return
 
+    // A folder adopted after a restart already carries the name this session
+    // chose. Without a fresh condensed name there is nothing to improve it to,
+    // so leave it alone rather than regress it to a sliced title.
+    if (state.adopted && !state.summary && String(read('summaryMode', 'ai')) === 'ai') return
+
     const now = new Date(session?.header?.createdAt ?? Date.now())
-    const { segments, leaf } = nameFor(session, now, titleFor(session, messages))
+    const { segments, leaf } = nameFor(session, state, now, titleFor(session, messages))
     if (!leaf || leaf === state.name) return
 
     const desired = join(resolve(state.dir, '..'), leaf)
@@ -564,8 +848,10 @@ export function apply(ctx, rawConfig) {
 
     const state = stateOf(session)
     if (state.settled) {
-      // Already placed; only the name may still need to catch up with a title
-      // that arrived after creation.
+      // Already placed; the name may still need to catch up with a title or a
+      // condensed name that arrived after creation. The request is only
+      // started here — a step's latency is never spent on a folder name.
+      requestSummary(agent, session, state, messages)
       await syncName(agent, session, state, messages)
       return
     }
@@ -579,6 +865,8 @@ export function apply(ctx, rawConfig) {
       state.dir = current
       state.name = basename(current)
       state.owned = await adoptExisting(current, session)
+      state.adopted = state.owned
+      requestSummary(agent, session, state, messages)
       await syncName(agent, session, state, messages)
       return
     }
@@ -592,8 +880,10 @@ export function apply(ctx, rawConfig) {
     if (state.dir !== undefined && (await adoptExisting(state.dir, session))) {
       await workingDirectory.set(agent, state.dir)
       state.owned = true
+      state.adopted = true
       state.name = basename(state.dir)
       state.settled = true
+      requestSummary(agent, session, state, messages)
       await syncName(agent, session, state, messages)
       return
     }
@@ -606,6 +896,7 @@ export function apply(ctx, rawConfig) {
       if (located !== undefined) {
         state.dir = located
         state.owned = true
+        state.adopted = true
         state.name = basename(located)
         await workingDirectory.set(agent, located)
         await syncName(agent, session, state, messages)
@@ -615,7 +906,7 @@ export function apply(ctx, rawConfig) {
     }
 
     const now = new Date(session?.header?.createdAt ?? Date.now())
-    const { segments } = nameFor(session, now, titleFor(session, messages))
+    const { segments } = nameFor(session, state, now, titleFor(session, messages))
     const directory = await allocate(workspace, segments)
     await writeMarker(directory, session)
     // Recorded before the durable write so a failed `set` is retried against
@@ -625,6 +916,10 @@ export function apply(ctx, rawConfig) {
     state.name = basename(directory)
     await workingDirectory.set(agent, directory)
     state.settled = true
+
+    // Ask the model for the real short name; the caller's next turn boundary
+    // picks it up. Never awaited here — a step's latency is not negotiable.
+    requestSummary(agent, session, state, messages)
   }
 
   const run = (agent, messages) => {
@@ -701,3 +996,4 @@ export function apply(ctx, rawConfig) {
     }
   })
 }
+

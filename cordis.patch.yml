@@ -6,5 +6,9 @@
         workspace: ''
         folderName: '{date}-{title}'
         titleChars: 6
+        summaryMode: ai
+        summaryProvider: ''
+        summaryModel: ''
+        summaryTimeoutMs: 25000
         collision: suffix
         createMode: immediate
