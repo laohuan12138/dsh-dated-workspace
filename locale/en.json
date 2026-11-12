@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Dated workspace folders",
+    "description": "Gives every new session opened in the workspace you choose its own folder named after the current date, and points that session's working directory into it."
+  }
+}

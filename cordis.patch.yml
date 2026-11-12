@@ -1,0 +1,10 @@
+- insert:
+    - id: dated-workspace
+      name: dsh-dated-workspace
+      config:
+        enabled: true
+        workspace: ''
+        folderName: '{date}-{title}'
+        titleChars: 6
+        collision: suffix
+        createMode: immediate

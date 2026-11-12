@@ -1,0 +1,65 @@
+{
+  "name": "dsh-dated-workspace",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Gives every new session opened in a configured workspace its own folder named after the date and the session title.",
+  "license": "MIT",
+  "author": "laohuan12138",
+  "homepage": "https://github.com/laohuan12138/dsh-dated-workspace#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/laohuan12138/dsh-dated-workspace.git"
+  },
+  "bugs": {
+    "url": "https://github.com/laohuan12138/dsh-dated-workspace/issues"
+  },
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "cordis",
+    "workspace",
+    "session",
+    "folder",
+    "date"
+  ],
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.4"
+  },
+  "engines": {
+    "node": ">=22.19",
+    "dsh": ">=0.2.1-rc.3 <0.3.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-plugin-manager",
+        "@deepseek-ai/dsh-client-ui-workspace"
+      ]
+    }
+  }
+}
