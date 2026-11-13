@@ -32,6 +32,12 @@ const MARKER_VERSION = 2
 const MAX_SEGMENTS = 4
 const MAX_NAME_CHARS = 64
 const DEFAULT_TITLE_CHARS = 6
+/**
+ * Budget for the model-written name. Larger than the slicing budget on purpose:
+ * a slice of six characters is a fragment nobody can read, while a condensed
+ * name of fifteen is a phrase — and the folder list has to fit it anyway.
+ */
+const DEFAULT_SUMMARY_CHARS = 15
 const ILLEGAL = /[<>:"/\\|?*\u0000-\u001f]/g
 const RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i
 /** Characters with no place at the start or end of a folder name. */
@@ -98,6 +104,13 @@ export const Config = schema
         .description(
           'ai 让默认模型把会话内容浓缩成不超过字数的简称（默认）；slice 直接截取标题前几个字。',
         ),
+      summaryChars: schema
+        .number()
+        .min(2)
+        .max(40)
+        .default(DEFAULT_SUMMARY_CHARS)
+        .volatile()
+        .description('AI 浓缩的简称最多几个字，默认 15。只影响 ai 模式，与上面的截取字数互不干扰。'),
       summaryProvider: schema
         .string()
         .default('')
@@ -238,8 +251,8 @@ export function condenseTitle(raw, maxChars = DEFAULT_TITLE_CHARS) {
  * so nothing longer than the budget can ever reach a folder name. CJK counts
  * per character, Latin per whole word, exactly like `condenseTitle`.
  */
-export function fitName(raw, maxChars = DEFAULT_TITLE_CHARS) {
-  const budget = Math.max(2, Math.min(24, Math.trunc(Number(maxChars) || DEFAULT_TITLE_CHARS)))
+export function fitName(raw, maxChars = DEFAULT_SUMMARY_CHARS) {
+  const budget = Math.max(2, Math.min(40, Math.trunc(Number(maxChars) || DEFAULT_SUMMARY_CHARS)))
   let text = String(raw ?? '')
     .replace(LEADING_NOISE, '')
     .replace(/[`*_#>]/g, ' ')
@@ -247,6 +260,10 @@ export function fitName(raw, maxChars = DEFAULT_TITLE_CHARS) {
     .replace(/\s+/g, ' ')
     .trim()
   if (!text) return ''
+  // A model that answers "文件夹名：登录页闪退" is following its habits, not the
+  // contract; the label is not part of the name.
+  const labelled = text.match(/^(?:文件夹名|名字|名称|简称|输出|答案)\s*[:：]\s*(.+)$/)
+  if (labelled) text = labelled[1].trim()
   const quoted = text.match(/^["'“”‘’「」『』【】](.+?)["'“”‘’「」『』【】]$/)
   if (quoted) text = quoted[1]
   text = trimEdges(text)
@@ -273,9 +290,12 @@ export function planSegments(template, now, session, options = {}) {
       .replace(/[^a-zA-Z0-9]/g, '')
       .slice(-8) || 'session'
   // A model-written summary wins over slicing: it is already the name the
-  // session is about, not its first few characters.
+  // session is about, not its first few characters. It gets its own, larger
+  // budget — fifteen characters of condensed meaning beat six of truncation.
+  const summaryBudget =
+    options.summaryChars === undefined ? DEFAULT_SUMMARY_CHARS : options.summaryChars
   const title =
-    fitName(options.summary, options.titleChars) || condenseTitle(options.title, options.titleChars) || id
+    fitName(options.summary, summaryBudget) || condenseTitle(options.title, options.titleChars) || id
   const rendered = String(template ?? '')
     .replace(/\{date\}/g, date)
     .replace(/\{time\}/g, time)
@@ -299,10 +319,10 @@ const MAX_SUMMARY_REQUESTS = 3
 /**
  * The conversation excerpt the model condenses.
  *
- * The first human message carries what the session is *for*; the latest
- * assistant text carries what it turned out to *be about*. Both together are
- * what a folder name should reflect, and nothing else is needed — tool
- * output would only add noise and bytes.
+ * The opening human turns carry what the session is *for*; the latest assistant
+ * text carries what it turned out to *be about*. Both together are what a
+ * folder name should reflect, and nothing else is needed — tool output would
+ * only add noise and bytes.
  */
 function collectTranscript(session, messages) {
   const parts = []
@@ -310,6 +330,8 @@ function collectTranscript(session, messages) {
   if (human) parts.push(`用户：${human}`)
   try {
     const events = session?.snapshotEvents?.() ?? []
+    // The most recent assistant text: it is the model's own account of what the
+    // session is working on, which is exactly what the name should say.
     for (let index = events.length - 1; index >= 0; index -= 1) {
       const event = events[index]
       if (event?.type !== 'assistant/message') continue
@@ -319,6 +341,18 @@ function collectTranscript(session, messages) {
         break
       }
     }
+    // A few later user turns keep the name attached to the real task after the
+    // first request has been superseded — but only the gist of each.
+    const later = []
+    for (let index = events.length - 1; index >= 0 && later.length < 3; index -= 1) {
+      const event = events[index]
+      if (event?.type !== 'user/message') continue
+      if (!isHumanMessage(event.data)) continue
+      const text = messageText(event.data)
+      if (!text || text === human) continue
+      later.unshift(`用户：${text.slice(0, 400)}`)
+    }
+    parts.push(...later)
   } catch {}
   return parts.join('\n\n').slice(0, TRANSCRIPT_MAX_CHARS).trim()
 }
@@ -326,13 +360,16 @@ function collectTranscript(session, messages) {
 /** The contract: one name, at most `budget` characters, no commentary. */
 function summarySystemPrompt(budget) {
   return [
-    `你是文件夹命名器。阅读给出的会话片段，用与会话相同的语言起一个不超过 ${budget} 个字的文件夹名。`,
-    '要求：',
-    `- 只输出名字本身，不超过 ${budget} 个字（中文按字算，英文按字符算），不要引号、标点、解释或前缀。`,
-    '- 概括会话真正在做的主题，而不是照抄开头几个字。',
-    '- 用名词性或动宾短语，例如「登录页闪退排查」「重构认证模块」。',
-    '- 名字里不要出现斜杠、冒号、星号等文件系统保留字符。',
-    '- 会话片段为空或无法判断时，输出「未命名」。',
+    '你是会话命名助手。阅读给出的会话片段，概括这次会话真正在做的事情，起一个文件夹名。',
+    '',
+    '硬性要求：',
+    `- 名字不超过 ${budget} 个字（中文按字算，英文按字符算）。`,
+    '- 只输出名字本身：不要引号、书名号、标点、序号、解释、前缀（不要「文件夹名：」）。',
+    `- 必须是概括，不是摘抄：不许把第一句话的前 ${budget} 个字原样搬过来。`,
+    '- 用名词性或动宾短语，说明对象和动作，例如「登录页闪退排查」「SMB 与 WMI 连通性排查」「重构认证模块」。',
+    '- 保留关键的专有名词（协议名、模块名、系统名），去掉「帮我」「看看」「一下」「最好是」这类口水词。',
+    '- 名字里不要出现 / \\ : * ? " < > | 这些文件系统保留字符。',
+    '- 会话片段为空、无法判断时，只输出「未命名」。',
   ].join('\n')
 }
 
@@ -530,6 +567,8 @@ export function apply(ctx, rawConfig) {
         summaryAttempts: 0,
         /** The folder was adopted from a previous run, not created by this one. */
         adopted: false,
+        /** A missing llm service or route has already been reported once. */
+        summaryBlocked: false,
       }
       states.set(session.id, state)
     }
@@ -696,6 +735,7 @@ export function apply(ctx, rawConfig) {
       title,
       summary: state?.summary,
       titleChars: read('titleChars', DEFAULT_TITLE_CHARS),
+      summaryChars: read('summaryChars', DEFAULT_SUMMARY_CHARS),
     })
     return { segments, leaf: segments[segments.length - 1] ?? '' }
   }
@@ -737,7 +777,20 @@ export function apply(ctx, rawConfig) {
 
     const llm = ctx.get?.('llm')
     const route = summaryRoute()
-    if (!llm || (typeof llm.prepareCall !== 'function' && typeof llm.stream !== 'function') || !route) {
+    if (!llm || (typeof llm.prepareCall !== 'function' && typeof llm.stream !== 'function')) {
+      // Say it once: silence here looks exactly like the old slicing-only build,
+      // which is the one thing a user debugging their folder names must not see.
+      if (!state.summaryBlocked) {
+        state.summaryBlocked = true
+        warn('当前 Host 没有可用的 llm 服务，会话简称退回标题截取。')
+      }
+      return
+    }
+    if (!route) {
+      if (!state.summaryBlocked) {
+        state.summaryBlocked = true
+        warn('没有可用的默认模型，会话简称退回标题截取。')
+      }
       return
     }
 
@@ -746,7 +799,7 @@ export function apply(ctx, rawConfig) {
 
     const budget = Math.max(
       2,
-      Math.min(24, Math.trunc(Number(read('titleChars', DEFAULT_TITLE_CHARS)) || DEFAULT_TITLE_CHARS)),
+      Math.min(40, Math.trunc(Number(read('summaryChars', DEFAULT_SUMMARY_CHARS)) || DEFAULT_SUMMARY_CHARS)),
     )
     const timeoutMs = Math.max(
       3000,

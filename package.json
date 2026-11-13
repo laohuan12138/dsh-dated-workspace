@@ -1,6 +1,6 @@
 {
   "name": "dsh-dated-workspace",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "type": "module",
   "description": "Gives every new session opened in a configured workspace its own folder named after the date and an AI-condensed session title.",
   "license": "MIT",
@@ -68,3 +68,4 @@
     }
   }
 }
+

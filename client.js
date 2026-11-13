@@ -43,6 +43,8 @@ window.__ModuleLoader__.load({
         '「AI 浓缩」让默认模型读完会话再起名，概括主题而不是截取开头几个字；模型不可用时自动退回截取。',
       summaryModeAi: 'AI 浓缩（默认）',
       summaryModeSlice: '标题截取',
+      summaryChars: '浓缩字数',
+      summaryCharsHint: 'AI 浓缩出的简称最多几个字，默认 15。比截取字数宽，因为一句话才能说清主题。',
       summaryModel: '浓缩用的模型',
       summaryModelHint:
         '留空跟随当前默认模型。要单独指定就同时填 provider 与模型 id，例如 new-api / deepseek-v4.1-flash。',
@@ -90,6 +92,8 @@ window.__ModuleLoader__.load({
         'AI summary reads the conversation and names its subject instead of cutting the first few characters. Falls back to slicing when no model is reachable.',
       summaryModeAi: 'AI summary (default)',
       summaryModeSlice: 'Slice the title',
+      summaryChars: 'Summary length',
+      summaryCharsHint: 'How many characters the condensed name keeps. Default 15 — wider than slicing, since a phrase needs room.',
       summaryModel: 'Summarising model',
       summaryModelHint:
         'Leave both empty to follow the current default model, or set provider and model id together (for example new-api / deepseek-v4.1-flash).',
@@ -161,7 +165,7 @@ window.__ModuleLoader__.load({
 
     /** Local echo of the Host's fitName, for the preview line only. */
     function fitName(raw, maxChars) {
-      const budget = Math.max(2, Math.min(24, Math.trunc(Number(maxChars) || 6)))
+      const budget = Math.max(2, Math.min(40, Math.trunc(Number(maxChars) || 15)))
       let text = String(raw || '')
         .replace(/^\s*(?:#{1,6}\s*|[-*+>]\s+|\d+[.)]\s+)/, '')
         .replace(/[`*_#>]/g, ' ')
@@ -169,6 +173,8 @@ window.__ModuleLoader__.load({
         .replace(/\s+/g, ' ')
         .trim()
       if (!text) return ''
+      const labelled = text.match(/^(?:文件夹名|名字|名称|简称|输出|答案)\s*[:：]\s*(.+)$/)
+      if (labelled) text = labelled[1].trim()
       const quoted = text.match(/^["'“”‘’「」『』【】](.+?)["'“”‘’「」『』【】]$/)
       if (quoted) text = quoted[1]
       text = trimEdges(text)
@@ -188,10 +194,10 @@ window.__ModuleLoader__.load({
       return trimEdges(out || Array.from(words[0] || '').slice(0, budget).join(''))
     }
 
-    function previewSegments(template, title, titleChars, summary) {
+    function previewSegments(template, title, titleChars, summary, summaryChars) {
       const now = new Date()
       const pad = (value) => String(value).padStart(2, '0')
-      const name = fitName(summary, titleChars) || condenseTitle(title, titleChars)
+      const name = fitName(summary, summaryChars) || condenseTitle(title, titleChars)
       const rendered = String(template || '')
         .replace(
           /\{date\}/g,
@@ -331,12 +337,13 @@ window.__ModuleLoader__.load({
       const collision = field('collision', 'suffix')
       const createMode = field('createMode', 'immediate')
       const summaryMode = field('summaryMode', 'ai')
+      const summaryChars = numberField('summaryChars', 15)
       const summaryProvider = field('summaryProvider', '')
       const summaryModel = field('summaryModel', '')
       const summaryTimeoutMs = numberField('summaryTimeoutMs', 25000)
       const sampleTitle = t('previewTitle')
       const sampleSummary = summaryMode === 'ai' ? t('previewSummary') : ''
-      const segments = previewSegments(templateText, sampleTitle, titleChars, sampleSummary)
+      const segments = previewSegments(templateText, sampleTitle, titleChars, sampleSummary, summaryChars)
 
       const write = async (name, next) => {
         setSaveError('')
@@ -452,6 +459,24 @@ window.__ModuleLoader__.load({
             : h(
                 'div',
                 { style: { display: 'flex', flexDirection: 'column', gap: 8 } },
+                h(
+                  'div',
+                  { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+                  h('span', { style: hint }, t('summaryChars')),
+                  h(TextField, {
+                    value: summaryChars,
+                    numeric: true,
+                    min: 2,
+                    max: 40,
+                    disabled: !writable,
+                    ariaLabel: t('summaryChars'),
+                    onCommit: (next) => {
+                      const parsed = Number.parseInt(String(next), 10)
+                      void write('summaryChars', Number.isFinite(parsed) ? parsed : 15)
+                    },
+                  }),
+                ),
+                h('div', { style: hint }, t('summaryCharsHint')),
                 h(TextField, {
                   value: summaryProvider,
                   disabled: !writable,

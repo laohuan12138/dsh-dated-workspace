@@ -87,7 +87,7 @@ check('card renders a section', aiNodes.some((n) => n.type === 'section'))
 check('name-source label present', aiLabels.includes('t:summaryMode'), aiLabels)
 check('AI summary button present', aiLabels.includes('t:summaryModeAi'), aiLabels)
 check('slice button present', aiLabels.includes('t:summaryModeSlice'), aiLabels)
-check('provider + model + timeout inputs present', aiInputs.length === 5, `inputs=${aiInputs.length}`)
+check('summaryChars + provider + model + timeout inputs present', aiInputs.length === 6, `inputs=${aiInputs.length}`)
 check('preview shows the AI sample name', aiLabels.includes('认证模块重构'), aiLabels)
 
 snapshotValue = snapshot({ summaryMode: 'slice' })
@@ -95,8 +95,10 @@ const sliceNodes = flat(render(Card({ t, form, pickDirectory: async () => '' }))
 const sliceLabels = labelText(sliceNodes)
 const sliceInputs = sliceNodes.filter((n) => n.type === 'input')
 check('slice mode hides model controls', sliceInputs.length === 2, `inputs=${sliceInputs.length}`)
-check('slice mode preview uses the sliced title', sliceLabels.includes('2026-11-12-重构认证模块'), sliceLabels)
+check('slice mode preview uses the sliced title', sliceLabels.includes('重构认证模块'), sliceLabels)
 console.log('CLIENT CARD OK')
+
+
 
 
 

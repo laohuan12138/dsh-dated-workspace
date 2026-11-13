@@ -102,7 +102,7 @@ const config = (workspace, over = {}) => ({
 
   entries = await readdir(workspace)
   check('d. exactly one folder after the rename', entries.length === 1, JSON.stringify(entries))
-  check('e. renamed to the condensed name, clipped to the budget', entries[0] === '2026-11-12-登录页闪退排', entries[0])
+  check('e. renamed to the condensed name (15-char budget keeps the whole phrase)', entries[0] === '2026-11-12-登录页闪退排查', entries[0])
   check('f. cwd follows the rename', host.state.current === join(workspace, entries[0]), host.state.current)
   check('g. one model call', host.state.modelCalls.length === 1, String(host.state.modelCalls.length))
   check('h. cheapest reasoning effort requested', host.state.modelCalls[0]?.reasoningEffort === 'low', JSON.stringify(host.state.modelCalls[0]))
@@ -185,6 +185,7 @@ const config = (workspace, over = {}) => ({
 
 console.log(fails === 0 ? 'ALL PASS' : `${fails} FAILURES`)
 process.exit(fails === 0 ? 0 : 1)
+
 
 
 
