@@ -44,7 +44,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node test/names.test.mjs && node test/plugin.test.mjs && node test/client-smoke.mjs"
+    "test": "node test/names.test.mjs && node test/plugin.test.mjs && node test/prepared-call.test.mjs && node test/client-smoke.mjs && node test/wiring.test.mjs"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.4"
@@ -68,4 +68,5 @@
     }
   }
 }
+
 

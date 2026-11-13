@@ -24,9 +24,12 @@
  */
 import { mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises'
 import { basename, join, relative, resolve, isAbsolute } from 'node:path'
+import { appendFileSync } from 'node:fs'
 import os from 'node:os'
 
 const PLUGIN = 'dsh-dated-workspace'
+/** Diagnostics land here; nothing in the feature depends on the write. */
+const TRACE_PATH = join(os.tmpdir(), 'dsh-dated-workspace.log')
 const MARKER = '.dsh-dated-workspace.json'
 const MARKER_VERSION = 2
 const MAX_SEGMENTS = 4
@@ -542,6 +545,22 @@ export function apply(ctx, rawConfig) {
       if (typeof logger?.warn === 'function') logger.warn(text)
       else console.warn(text)
     } catch {}
+    trace('warn', message)
+  }
+
+  /**
+   * Append one diagnostic line to the temp log.
+   *
+   * The Host's console is not visible from the app window, so "the folder name
+   * is still sliced" has no other evidence trail. Every summary attempt leaves
+   * a line here — route, prompt size, the raw answer, the cleaned name, or the
+   * failure — which is what turns a guess into a diagnosis.
+   */
+  function trace(event, data) {
+    try {
+      const line = `${new Date().toISOString()} ${event} ${typeof data === 'string' ? data : JSON.stringify(data)}\n`
+      appendFileSync(TRACE_PATH, line)
+    } catch {}
   }
 
   const states = new Map()
@@ -811,6 +830,13 @@ export function apply(ctx, rawConfig) {
     state.summaryAttempts += 1
 
     void (async () => {
+      trace('summary:start', {
+        session: session?.id,
+        route: `${route.provider}/${route.model}`,
+        budget,
+        chars: transcript.length,
+        attempt: state.summaryAttempts,
+      })
       try {
         const raw = await requestSummaryName(llm, route, {
           system: summarySystemPrompt(budget),
@@ -818,14 +844,16 @@ export function apply(ctx, rawConfig) {
           signal: controller.signal,
         })
         const name = fitName(raw, budget)
+        trace('summary:answer', { session: session?.id, raw: String(raw ?? '').slice(0, 200), name })
         if (name && name !== '未命名') {
           state.summary = name
           state.summarySettled = true
-          // The name landed out of band: re-enter the queue so the folder is
-          // renamed now rather than at the next user turn. `summarySettled`
-          // makes this a one-shot nudge, not a loop.
+          // The name landed out of band. Nudge the queue only when the agent is
+          // idle: renaming a folder mid-turn on Windows can fail against a
+          // directory a running tool holds, and it would invalidate paths the
+          // model already printed. A busy agent gets renamed at `turn/end`.
           const live = ctx.get?.('agents')?.get?.(session?.id)
-          if (live !== undefined) void run(live)
+          if (live !== undefined && live.status !== 'running') void run(live)
         }
       } catch (error) {
         // A missing model, a refused route or a timeout is not an error the user
@@ -890,6 +918,7 @@ export function apply(ctx, rawConfig) {
 
     state.dir = target
     state.name = basename(target)
+    trace('rename', { session: session?.id, to: basename(target), summary: state.summary || '' })
   }
 
   async function step(agent, messages) {
