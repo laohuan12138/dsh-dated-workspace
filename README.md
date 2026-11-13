@@ -128,10 +128,48 @@ dsh plugin --profile desktop remove dsh-dated-workspace
 ## 自测
 
 ```powershell
-node test\names.test.mjs      # 简称清洗与模板拼装
-node test\plugin.test.mjs     # 建夹/改名/降级/只影响目标工作区（模拟 Host）
-node test\client-smoke.mjs    # 设置卡渲染（模拟 React）
+npm test    # = names + plugin + prepared-call + client-smoke + wiring 五个套件
 ```
+
+单跑某一个：
+
+```powershell
+node test\names.test.mjs          # 简称清洗与模板拼装
+node test\plugin.test.mjs         # 建夹/改名/降级/只影响目标工作区（模拟 Host）
+node test\prepared-call.test.mjs  # 复刻 Host 的 prepared.stream 配置一致性契约
+node test\client-smoke.mjs        # 设置卡渲染（模拟 React）
+node test\wiring.test.mjs         # 关键接线断言（schema 字段、默认值、提示词要求）
+```
+
+## 排查"名字还是截取的"
+
+Host 的 console 在应用窗口里看不见，所以每次浓缩都会写一行到：
+
+```
+%TEMP%\dsh-dated-workspace.log
+```
+
+```powershell
+Get-Content "$env:TEMP\dsh-dated-workspace.log" -Tail 20
+```
+
+正常一次会是这样：
+
+```
+... summary:start  {"session":"abc","route":"new-api/deepseek-v4.1-flash","budget":15,"chars":812,"attempt":1}
+... summary:answer {"session":"abc","raw":"「SMB 与 WMI 连通性排查」","name":"SMB 与 WMI 连通性排查"}
+... rename         {"session":"abc","to":"2026-11-13-SMB 与 WMI 连通性排查","summary":"SMB 与 WMI 连通性排查"}
+```
+
+对照表：
+
+| 日志里看到 | 说明 |
+|---|---|
+| 一条都没有 | 跑的是旧版代码（没有 `summaryMode`），或 `summaryMode: slice` |
+| `当前 Host 没有可用的 llm 服务` | Host 没挂 `llm`，只能截取 |
+| `没有可用的默认模型` | provider/model 没配，或 `summaryProvider`/`summaryModel` 只填了一个 |
+| `summary:answer` 但 `name` 被截 | 模型给的名字量化后仍超长，检查「浓缩字数」 |
+| `生成会话简称失败…` | provider 报错/超时，日志里有原始错误 |
 
 ## License
 
